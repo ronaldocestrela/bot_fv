@@ -324,6 +324,17 @@ class Database:
             if row is None:
                 return False
             was_green = bool(row["green"])
+            if green:
+                other = conn.execute(
+                    """
+                    SELECT 1 FROM signal_entries
+                    WHERE dispatch_id = ? AND green = 1 AND match_id != ?
+                    LIMIT 1
+                    """,
+                    (dispatch_id, match_id),
+                ).fetchone()
+                if other is not None:
+                    green = False
             conn.execute(
                 """
                 UPDATE signal_entries

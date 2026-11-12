@@ -100,6 +100,86 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(db.dispatch_is_fully_settled(dispatch_id))
             self.assertEqual(db.list_open_signal_entries(), [])
 
+    async def test_only_one_green_per_dispatch_same_cycle(self) -> None:
+        results = [
+            {"id": "m1", "homeGoals": 2, "awayGoals": 2},
+            {"id": "m2", "homeGoals": 2, "awayGoals": 2},
+            {"id": "m3", "homeGoals": 0, "awayGoals": 0},
+        ]
+        feed = FakeFeed(results)
+        sender = FakeSender()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "t.sqlite")
+            dispatch_id = db.ensure_fingerprints("body", ["fp1"])
+            db.record_signal_entries(
+                dispatch_id,
+                league_slug="liga-x",
+                league_name="Liga",
+                entradas=[
+                    {"id": "m1", "horario": "10:00"},
+                    {"id": "m2", "horario": "10:02"},
+                    {"id": "m3", "horario": "10:04"},
+                ],
+            )
+            db.record_delivery(dispatch_id, 42, success=True, message_id=555)
+
+            service = SignalSettlementService(
+                db, feed, sender, signup_url="https://example.com"
+            )
+            edits = await service.run_once()
+            self.assertEqual(edits, 1)
+            self.assertEqual(len(sender.edits), 1)
+            _, _, text = sender.edits[0]
+            self.assertEqual(text.count("✅ GREEN"), 1)
+            self.assertIn("⏰ 10:00 ✅ GREEN", text)
+            self.assertNotIn("⏰ 10:02 ✅ GREEN", text)
+
+            greens = [e for e in db.signal_entries_for_dispatch(dispatch_id) if e.green]
+            self.assertEqual(len(greens), 1)
+            self.assertEqual(greens[0].match_id, "m1")
+
+    async def test_second_over_later_does_not_add_green(self) -> None:
+        results = [
+            {"id": "m1", "homeGoals": 2, "awayGoals": 2},
+            {"id": "m2", "homeGoals": 1, "awayGoals": 1},
+        ]
+        feed = FakeFeed(results)
+        sender = FakeSender()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "t.sqlite")
+            dispatch_id = db.ensure_fingerprints("body", ["fp1"])
+            db.record_signal_entries(
+                dispatch_id,
+                league_slug="liga-x",
+                league_name="Liga",
+                entradas=[
+                    {"id": "m1", "horario": "10:00"},
+                    {"id": "m2", "horario": "10:02"},
+                    {"id": "m3", "horario": "10:04"},
+                ],
+            )
+            db.record_delivery(dispatch_id, 42, success=True, message_id=555)
+
+            service = SignalSettlementService(
+                db, feed, sender, signup_url="https://example.com"
+            )
+            await service.run_once()
+            self.assertEqual(len(sender.edits), 1)
+
+            feed._results = [
+                {"id": "m1", "homeGoals": 2, "awayGoals": 2},
+                {"id": "m2", "homeGoals": 1, "awayGoals": 1},
+                {"id": "m3", "homeGoals": 3, "awayGoals": 2},
+            ]
+            edits = await service.run_once()
+            self.assertEqual(edits, 0)
+            self.assertEqual(len(sender.edits), 1)
+            _, _, text = sender.edits[0]
+            self.assertEqual(text.count("✅ GREEN"), 1)
+            self.assertIn("⏰ 10:00 ✅ GREEN", text)
+
     async def test_settlement_edits_message_on_green(self) -> None:
         results = [
             {"id": "m1", "homeGoals": 1, "awayGoals": 1},
