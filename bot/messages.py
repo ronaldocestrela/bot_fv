@@ -52,6 +52,19 @@ def build_pattern_message(alert: dict[str, Any], signup_url: str) -> str:
     return "\n".join(lines)
 
 
+def build_red_message(alert: dict[str, Any]) -> str:
+    liga = html.escape(league_display_name(alert))
+    lines = [
+        f"Liga: {liga}",
+        "",
+    ]
+    for entrada in alert.get("entradas", []):
+        horario = html.escape(entrada["horario"])
+        lines.append(f"⏰ {horario}")
+    lines.extend(["", "✖️"])
+    return "\n".join(lines)
+
+
 def group_alerts_for_broadcast(alerts: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for alert in alerts:

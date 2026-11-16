@@ -4,14 +4,14 @@ import logging
 from typing import Any
 
 from bot.db import Database
-from bot.messages import build_pattern_message
+from bot.messages import build_pattern_message, build_red_message
 from bot.ports import MessageSender, VirtualFeedPort
 
 logger = logging.getLogger(__name__)
 
 
 class SignalSettlementService:
-    """Acompanha jogos das entradas enviadas e edita a mensagem quando houver GREEN."""
+    """Acompanha jogos das entradas enviadas e edita a mensagem em GREEN ou RED."""
 
     def __init__(
         self,
@@ -36,6 +36,7 @@ class SignalSettlementService:
             by_league.setdefault(entry.league_slug, []).append(entry)
 
         dispatch_ids_to_refresh: set[int] = set()
+        dispatch_ids_settled_this_cycle: set[int] = set()
 
         for league_slug, entries in by_league.items():
             try:
@@ -67,12 +68,21 @@ class SignalSettlementService:
                     total_goals=total_goals,
                     green=green,
                 )
+                dispatch_ids_settled_this_cycle.add(entry.dispatch_id)
                 if newly_green:
                     dispatch_ids_to_refresh.add(entry.dispatch_id)
 
         edits = 0
         for dispatch_id in dispatch_ids_to_refresh:
             edits += await self._refresh_dispatch_messages(dispatch_id)
+
+        for dispatch_id in dispatch_ids_settled_this_cycle - dispatch_ids_to_refresh:
+            if not self._db.dispatch_is_fully_settled(dispatch_id):
+                continue
+            entries = self._db.signal_entries_for_dispatch(dispatch_id)
+            if any(item.green for item in entries):
+                continue
+            edits += await self._refresh_dispatch_red_messages(dispatch_id)
 
         self._db.close_resolved_entries()
         return edits
@@ -111,6 +121,43 @@ class SignalSettlementService:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "Falha ao editar mensagem dispatch=%s chat=%s msg=%s: %s",
+                    dispatch_id,
+                    ref.chat_id,
+                    ref.message_id,
+                    exc,
+                )
+        return updated
+
+    async def _refresh_dispatch_red_messages(self, dispatch_id: int) -> int:
+        entries = self._db.signal_entries_for_dispatch(dispatch_id)
+        if not entries:
+            return 0
+
+        first = entries[0]
+        alert: dict[str, Any] = {
+            "liga": first.league_slug,
+            "liga_nome": first.league_name,
+            "entradas": [{"horario": item.horario} for item in entries],
+        }
+        body = build_red_message(alert)
+        deliveries = self._db.successful_deliveries_with_message(dispatch_id)
+        if not deliveries:
+            return 0
+
+        updated = 0
+        for ref in deliveries:
+            try:
+                await self._sender.edit_text(
+                    ref.chat_id,
+                    ref.message_id,
+                    body,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                updated += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Falha ao editar mensagem RED dispatch=%s chat=%s msg=%s: %s",
                     dispatch_id,
                     ref.chat_id,
                     ref.message_id,

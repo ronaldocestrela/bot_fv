@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from bot.db import Database
-from bot.messages import build_pattern_message
+from bot.messages import build_pattern_message, build_red_message
 from bot.services.settlement import SignalSettlementService
 
 
@@ -55,6 +55,26 @@ class FakeFeed:
 
 
 class SettlementTests(unittest.IsolatedAsyncioTestCase):
+    def test_build_red_message_format(self) -> None:
+        alert = {
+            "liga": "virtual-kiron-italia",
+            "entradas": [
+                {"horario": "12:19"},
+                {"horario": "12:21"},
+                {"horario": "12:23"},
+            ],
+        }
+        text = build_red_message(alert)
+        self.assertIn("Liga:", text)
+        self.assertIn("V-Itália Partida Única", text)
+        self.assertIn("⏰ 12:19", text)
+        self.assertIn("⏰ 12:21", text)
+        self.assertIn("⏰ 12:23", text)
+        self.assertIn("✖️", text)
+        self.assertNotIn("✅ GREEN", text)
+        self.assertNotIn("CLIQUE AQUI", text)
+        self.assertNotIn("PADRÃO", text)
+
     def test_build_pattern_message_marks_green(self) -> None:
         alert = {
             "liga": "virtual-kiron-inglaterra",
@@ -213,6 +233,68 @@ class SettlementTests(unittest.IsolatedAsyncioTestCase):
             _, _, text = sender.edits[0]
             self.assertIn("⏰ 10:02 ✅ GREEN", text)
             self.assertNotIn("⏰ 10:00 ✅ GREEN", text)
+
+    async def test_settlement_edits_red_when_all_under_two_five(self) -> None:
+        results = [
+            {"id": "m1", "homeGoals": 1, "awayGoals": 0},
+            {"id": "m2", "homeGoals": 0, "awayGoals": 1},
+            {"id": "m3", "homeGoals": 1, "awayGoals": 1},
+        ]
+        feed = FakeFeed(results)
+        sender = FakeSender()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "t.sqlite")
+            dispatch_id = db.ensure_fingerprints("body", ["fp1"])
+            db.record_signal_entries(
+                dispatch_id,
+                league_slug="virtual-kiron-italia",
+                league_name="Itália",
+                entradas=[
+                    {"id": "m1", "horario": "12:19"},
+                    {"id": "m2", "horario": "12:21"},
+                    {"id": "m3", "horario": "12:23"},
+                ],
+            )
+            db.record_delivery(dispatch_id, 42, success=True, message_id=555)
+
+            service = SignalSettlementService(
+                db, feed, sender, signup_url="https://example.com"
+            )
+            edits = await service.run_once()
+            self.assertEqual(edits, 1)
+            self.assertEqual(len(sender.edits), 1)
+            _, _, text = sender.edits[0]
+            self.assertIn("✖️", text)
+            self.assertIn("⏰ 12:19", text)
+            self.assertNotIn("✅ GREEN", text)
+
+    async def test_partial_settlement_does_not_edit_red(self) -> None:
+        results = [{"id": "m1", "homeGoals": 1, "awayGoals": 0}]
+        feed = FakeFeed(results)
+        sender = FakeSender()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "t.sqlite")
+            dispatch_id = db.ensure_fingerprints("body", ["fp1"])
+            db.record_signal_entries(
+                dispatch_id,
+                league_slug="liga-x",
+                league_name="Liga",
+                entradas=[
+                    {"id": "m1", "horario": "10:00"},
+                    {"id": "m2", "horario": "10:02"},
+                    {"id": "m3", "horario": "10:04"},
+                ],
+            )
+            db.record_delivery(dispatch_id, 42, success=True, message_id=555)
+
+            service = SignalSettlementService(
+                db, feed, sender, signup_url="https://example.com"
+            )
+            edits = await service.run_once()
+            self.assertEqual(edits, 0)
+            self.assertEqual(len(sender.edits), 0)
 
     async def test_open_entries_until_all_scored(self) -> None:
         results = [{"id": "m1", "homeGoals": 1, "awayGoals": 0}]
